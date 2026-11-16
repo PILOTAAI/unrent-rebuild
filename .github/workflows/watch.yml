@@ -1,0 +1,48 @@
+name: watch
+# Finds Unrent agent releases this repository has not countersigned yet and starts rebuild.yml for each, at a tag of
+# the same name in THIS repository (a tag pushed with GITHUB_TOKEN starts no workflow; a dispatch at that tag does,
+# and its certificate then names refs/tags/agent-v<version>). A release qualifies once PILOTAAI/unrent has the tag
+# and get.unrent.dev publishes it (with the release workflow's signature, sigstore 1-of-2).
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: watch
+  cancel-in-progress: false
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write          # create the tag in this repository
+      actions: write           # dispatch rebuild.yml at it
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PILOTAAI/unrent
+          ssh-key: ${{ secrets.UNRENT_SOURCE_DEPLOY_KEY }}
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Start rebuilds
+        run: |
+          git -C src fetch --quiet --depth 1 origin 'refs/tags/agent-v*:refs/tags/agent-v*'
+          for tag in $(git -C src tag -l 'agent-v*' --sort=-v:refname | head -10); do
+            v=${tag#agent-v}
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then continue; fi
+            s=$(curl -fsS "https://get.unrent.dev/releases/$v/manifest.json" | jq -r .sigstore 2>/dev/null || echo unpublished)
+            [ "$s" = 1-of-2 ] || { echo "$tag: get.unrent.dev has '$s'; nothing to do"; continue; }
+            if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+              gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
+            fi
+            # One run per tag (a run already in progress or queued is left alone).
+            if [ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow rebuild.yml --branch "$tag" --json status --jq '[.[] | select(.status != "completed")] | length')" = 0 ]; then
+              gh workflow run rebuild.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+              echo "$tag: rebuild started"
+            fi
+          done
