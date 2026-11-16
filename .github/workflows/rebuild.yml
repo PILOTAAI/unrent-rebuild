@@ -1,0 +1,92 @@
+name: rebuild
+# Signature 2 of 2 for Unrent agent releases (README.md). Runs at refs/tags/agent-v<version> of THIS repository
+# (watch.yml creates the tag and dispatches this workflow there, or a person pushes the tag): the Fulcio certificate's
+# SAN is then https://github.com/PILOTAAI/unrent-rebuild/.github/workflows/rebuild.yml@refs/tags/agent-v<version>,
+# the identity Unrent agents require next to the release workflow's.
+#
+# It rebuilds PILOTAAI/unrent at the same tag (read-only deploy key) with the release's own reproducible build and
+# signs ONLY if every tarball has exactly the published SHA-256; then it publishes the bundles as this repository's
+# release agent-v<version>, where get.unrent.dev picks them up.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['agent-v*']
+permissions:
+  contents: read
+concurrency:
+  group: rebuild-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  rebuild:
+    if: startsWith(github.ref, 'refs/tags/agent-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: rebuild       # deployment policy: tags agent-v* only (infra/github)
+    permissions:
+      contents: write          # this repository's release
+      id-token: write          # GitHub OIDC → Fulcio certificate (keyless signature)
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { path: rebuild, persist-credentials: false }
+      - name: Version
+        run: |
+          v=${GITHUB_REF_NAME#agent-v}
+          printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "::error::bad tag $GITHUB_REF_NAME"; exit 1; }
+          if gh release view "agent-v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "::error::agent-v$v is already countersigned"; exit 1; fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      # The source, read-only: a deploy key on PILOTAAI/unrent created by Unrent's OpenTofu (infra/github).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PILOTAAI/unrent
+          ref: refs/tags/${{ github.ref_name }}
+          ssh-key: ${{ secrets.UNRENT_SOURCE_DEPLOY_KEY }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: src/agent/go.mod, cache: false }
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with: { cosign-release: v3.1.4 }
+      - name: Signature 1 with cosign (independently of the agent's verifier, which rebuild.sh uses)
+        run: |
+          mkdir -p pub
+          for arch in amd64 arm64; do
+            f="unrent-$VERSION-linux-$arch.tar.gz"
+            curl -fsS --retry 5 --retry-all-errors -o "pub/$f" "https://get.unrent.dev/releases/$VERSION/$f"
+            curl -fsS --retry 5 --retry-all-errors -o "pub/$f.release.sigstore.json" "https://get.unrent.dev/releases/$VERSION/$f.release.sigstore.json"
+            cosign verify-blob --bundle "pub/$f.release.sigstore.json" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/PILOTAAI/unrent/.github/workflows/agent-release.yml@refs/tags/agent-v$VERSION" \
+              --certificate-github-workflow-repository PILOTAAI/unrent --certificate-github-workflow-ref "refs/tags/agent-v$VERSION" "pub/$f"
+          done
+      - name: Rebuild and compare byte for byte
+        run: rebuild/scripts/rebuild.sh "$VERSION" src out
+      # Only identical bytes get here. Keyless, at this repository's tag; the signing config pins Fulcio, Rekor v1 and
+      # the TSA (rekor.sigstore.dev, where Unrent's release-watch looks).
+      - name: Sign keylessly (signature 2 of 2)
+        run: |
+          for f in out/rebuilt/unrent-*.tar.gz; do
+            cmp "$f" "out/published/$(basename "$f")"
+            cosign sign-blob --yes --signing-config rebuild/signing-config.json --bundle "$f.rebuild.sigstore.json" "$f"
+            cosign verify-blob --bundle "$f.rebuild.sigstore.json" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/rebuild.yml@refs/tags/agent-v$VERSION" "$f"
+          done
+          # Both signatures together, exactly as the agent checks them.
+          for f in out/rebuilt/unrent-*.tar.gz; do
+            out/release-tool verify -version "$VERSION" -file "$f" -release "out/published/$(basename "$f").release.sigstore.json" -rebuild "$f.rebuild.sigstore.json"
+          done
+      - name: Publish the countersignature
+        run: |
+          commit=$(git -C src rev-parse HEAD)
+          {
+            echo "Rebuilt PILOTAAI/unrent \`agent-v$VERSION\` ($commit) with \`agent/packaging/release.sh\` and the published image lock;"
+            echo "every tarball has exactly the published SHA-256, so this repository's workflow signed it (signature 2 of 2)."
+            echo
+            echo '```'
+            (cd out/rebuilt && sha256sum unrent-*.tar.gz)
+            echo '```'
+          } > notes.md
+          (cd out/rebuilt && sha256sum unrent-*.tar.gz > SHA256SUMS)
+          gh release create "agent-v$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Rebuild of agent $VERSION" --notes-file notes.md \
+            out/rebuilt/*.rebuild.sigstore.json out/rebuilt/SHA256SUMS
