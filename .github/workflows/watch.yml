@@ -28,10 +28,12 @@ jobs:
           ssh-key: ${{ secrets.UNRENT_SOURCE_DEPLOY_KEY }}
           path: src
           fetch-depth: 1
+          # The tags come with the checkout, while the deploy key is there: with persist-credentials off, a later
+          # `git fetch` has no key (every run failed "Permission denied (publickey)" until 2026-11-18).
+          fetch-tags: true
           persist-credentials: false
       - name: Start rebuilds
         run: |
-          git -C src fetch --quiet --depth 1 origin 'refs/tags/agent-v*:refs/tags/agent-v*'
           for tag in $(git -C src tag -l 'agent-v*' --sort=-v:refname | head -10); do
             v=${tag#agent-v}
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then continue; fi
