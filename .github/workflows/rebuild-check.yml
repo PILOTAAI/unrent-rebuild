@@ -1,0 +1,68 @@
+name: rebuild-check
+run-name: rebuild-check ${{ inputs.version }}
+# A dry run of rebuild.yml for one release, on main: the same source checkout, signature-1 verification and byte-for-byte
+# rebuild, with no tag, no environment, no OIDC token, no signature and no release. watch.yml creates the protected
+# tag agent-v<version> (which can never move or be deleted, infra/github/rebuild.tf) and dispatches rebuild.yml there
+# only after this passed for that version at the same commit of main, so a broken workflow can no longer pin a release
+# to a tag that cannot be countersigned (agent-v0.4.1 was tagged on a commit whose rebuild.yml could not run).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Agent release to rebuild (for example 0.5.0)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: rebuild-check-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { path: rebuild, persist-credentials: false }
+      - name: Version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          v=$INPUT_VERSION
+          printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "::error::bad version $v"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      # The source, read-only, at the release's tag in PILOTAAI/unrent (the deploy key exists only during this step).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: PILOTAAI/unrent
+          ref: refs/tags/agent-v${{ inputs.version }}
+          ssh-key: ${{ secrets.UNRENT_SOURCE_DEPLOY_KEY }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version-file: src/agent/go.mod, cache: false }
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with: { cosign-release: v3.1.4 }
+      - name: Signature 1 with cosign (independently of the agent's verifier, which rebuild.sh uses)
+        run: |
+          mkdir -p pub
+          for arch in amd64 arm64; do
+            f="unrent-$VERSION-linux-$arch.tar.gz"
+            curl -fsS --retry 5 --retry-all-errors -o "pub/$f" "https://get.unrent.dev/releases/$VERSION/$f"
+            curl -fsS --retry 5 --retry-all-errors -o "pub/$f.release.sigstore.json" "https://get.unrent.dev/releases/$VERSION/$f.release.sigstore.json"
+            cosign verify-blob --bundle "pub/$f.release.sigstore.json" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/PILOTAAI/unrent/.github/workflows/agent-release.yml@refs/tags/agent-v$VERSION" \
+              --certificate-github-workflow-repository PILOTAAI/unrent --certificate-github-workflow-ref "refs/tags/agent-v$VERSION" "pub/$f"
+          done
+      - name: Rebuild and compare byte for byte
+        # bash: OpenTofu syncs this file through the contents API, which does not keep the executable bit.
+        run: bash rebuild/scripts/rebuild.sh "$VERSION" src out
+      - name: Report
+        run: |
+          { echo "## agent $VERSION rebuilds byte for byte"; echo; echo '```'; (cd out/rebuilt && sha256sum unrent-*.tar.gz); echo '```'; } >> "$GITHUB_STEP_SUMMARY"
