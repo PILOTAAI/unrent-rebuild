@@ -17,8 +17,13 @@ public-good trusted root compiled into it. One compromised pipeline cannot ship 
 ## How it works
 
 1. `watch.yml` (every 15 minutes) lists `agent-v*` tags of PILOTAAI/unrent (read-only deploy key) and, for a release
-   that get.unrent.dev publishes with only the first signature (`"sigstore": "1-of-2"`), creates the same tag in this
-   repository and dispatches `rebuild.yml` at it.
+   that get.unrent.dev publishes with only the first signature (`"sigstore": "1-of-2"`):
+   - first dispatches `rebuild-check.yml` on `main`: the same checkout, signature-1 check and byte-for-byte rebuild as
+     `rebuild.yml`, with no token, tag, signature or release;
+   - only once that dry run passed for the version at the same commit of `main`, creates the same tag in this
+     repository and dispatches `rebuild.yml` at it. The tag can never move or be deleted (ruleset), so a workflow that
+     cannot run must not be tagged: agent-v0.4.1 was tagged on such a commit (the script lacked its executable bit
+     through the sync) and stays at one signature; 0.5.0 is the first release through the dry run.
 2. `rebuild.yml` (environment `rebuild`, tags `agent-v*` only):
    - checks signature 1 with cosign v3.1.4 and with the agent's own verifier;
    - `scripts/rebuild.sh`: the tag must be on PILOTAAI/unrent's `main`; downloads the published tarballs; takes the
