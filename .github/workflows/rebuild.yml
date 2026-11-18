@@ -61,7 +61,8 @@ jobs:
               --certificate-github-workflow-repository PILOTAAI/unrent --certificate-github-workflow-ref "refs/tags/agent-v$VERSION" "pub/$f"
           done
       - name: Rebuild and compare byte for byte
-        run: rebuild/scripts/rebuild.sh "$VERSION" src out
+        # bash: OpenTofu syncs this file through the contents API, which does not keep the executable bit.
+        run: bash rebuild/scripts/rebuild.sh "$VERSION" src out
       # Only identical bytes get here. Keyless, at this repository's tag; the signing config pins Fulcio, Rekor v1 and
       # the TSA (rekor.sigstore.dev, where Unrent's release-watch looks).
       - name: Sign keylessly (signature 2 of 2)
