@@ -40,6 +40,23 @@ jobs:
             s=$(curl -fsS "https://get.unrent.dev/releases/$v/manifest.json" | jq -r .sigstore 2>/dev/null || echo unpublished)
             [ "$s" = 1-of-2 ] || { echo "$tag: get.unrent.dev has '$s'; nothing to do"; continue; }
             if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
+              # The tag can never move or be deleted (infra/github/rebuild.tf), so it is created only once a dry run
+              # (rebuild-check.yml) passed for this version at this very commit of main; a failed dry run is reported
+              # and not retried until main changes (a person can dispatch it again).
+              runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow rebuild-check.yml --branch main --limit 50 \
+                --json displayTitle,headSha,status,conclusion \
+                --jq "[.[] | select(.displayTitle == \"rebuild-check $v\" and .headSha == \"$GITHUB_SHA\")]")
+              if [ "$(jq '[.[] | select(.conclusion == "success")] | length' <<<"$runs")" = 0 ]; then
+                if [ "$(jq 'length' <<<"$runs")" = 0 ]; then
+                  gh workflow run rebuild-check.yml --repo "$GITHUB_REPOSITORY" --ref main -f version="$v"
+                  echo "$tag: dry run started"
+                elif [ "$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")" != 0 ]; then
+                  echo "$tag: dry run in progress"
+                else
+                  echo "::warning::$tag: the dry run failed at this commit; no tag is created (fix release-rebuild/ and sync)"
+                fi
+                continue
+              fi
               gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
             fi
             # One run per tag (a run already in progress or queued is left alone).
