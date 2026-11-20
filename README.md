@@ -23,7 +23,9 @@ public-good trusted root compiled into it. One compromised pipeline cannot ship 
    - only once that dry run passed for the version at the same commit of `main`, creates the same tag in this
      repository and dispatches `rebuild.yml` at it. The tag can never move or be deleted (ruleset), so a workflow that
      cannot run must not be tagged: agent-v0.4.1 was tagged on such a commit (the script lacked its executable bit
-     through the sync) and stays at one signature; 0.5.0 is the first release through the dry run.
+     through the sync) and stays at one signature; 0.5.0 is the first release through the dry run. A tag whose
+     `rebuild.yml` failed 3 times is no longer retried (the workflow at a tag never changes); a person can still
+     dispatch it.
 2. `rebuild.yml` (environment `rebuild`, tags `agent-v*` only):
    - checks signature 1 with cosign v3.1.4 and with the agent's own verifier;
    - `scripts/rebuild.sh`: the tag must be on PILOTAAI/unrent's `main`; downloads the published tarballs; takes the
