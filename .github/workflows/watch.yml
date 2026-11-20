@@ -59,8 +59,15 @@ jobs:
               fi
               gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" >/dev/null
             fi
-            # One run per tag (a run already in progress or queued is left alone).
-            if [ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow rebuild.yml --branch "$tag" --json status --jq '[.[] | select(.status != "completed")] | length')" = 0 ]; then
+            # One run per tag (a run already in progress or queued is left alone). A tag runs the workflow at that tag,
+            # which never changes: after 3 failed runs the failure is not transient (agent-v0.4.1), so it is reported
+            # and no longer retried; a person can still dispatch rebuild.yml at the tag.
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow rebuild.yml --branch "$tag" --limit 50 --json status,conclusion)
+            if [ "$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")" != 0 ]; then
+              echo "$tag: rebuild in progress"
+            elif [ "$(jq '[.[] | select(.conclusion == "failure")] | length' <<<"$runs")" -ge 3 ]; then
+              echo "::warning::$tag: rebuild.yml failed 3 times at this tag; not retried (the tag cannot move; the next release is countersigned)"
+            else
               gh workflow run rebuild.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
               echo "$tag: rebuild started"
             fi
