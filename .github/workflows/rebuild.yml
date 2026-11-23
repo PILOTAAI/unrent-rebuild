@@ -1,6 +1,7 @@
 name: rebuild
 # Signature 2 of 2 for Unrent agent releases (README.md). Runs at refs/tags/agent-v<version> of THIS repository
-# (watch.yml creates the tag and dispatches this workflow there, or a person pushes the tag): the Fulcio certificate's
+# (watch.yml creates the tag on main with the release tagger App, whose push starts this; nobody else can create it,
+# NV-37), and the tagged commit must be on this repository's main: the Fulcio certificate's
 # SAN is then https://github.com/PILOTAAI/unrent-rebuild/.github/workflows/rebuild.yml@refs/tags/agent-v<version>,
 # the identity Unrent agents require next to the release workflow's.
 #
@@ -28,12 +29,17 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # fetch-depth 0: this repository's main, for the check that the tag is on it.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { path: rebuild, persist-credentials: false }
+        with: { path: rebuild, fetch-depth: 0, persist-credentials: false }
       - name: Version
         run: |
           v=${GITHUB_REF_NAME#agent-v}
           printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "::error::bad tag $GITHUB_REF_NAME"; exit 1; }
+          # NV-37: the workflow and rebuild.sh that sign are this repository's main (watch.yml tags main; only the
+          # release tagger App can create the tag); a tag on any other commit is refused before anything is signed.
+          git -C rebuild rev-parse --verify --quiet refs/remotes/origin/main >/dev/null || { echo "::error::origin/main is missing from the checkout"; exit 1; }
+          git -C rebuild merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || { echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not on this repository's main; not signing"; exit 1; }
           if gh release view "agent-v$v" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "::error::agent-v$v is already countersigned"; exit 1; fi
           echo "VERSION=$v" >> "$GITHUB_ENV"
       # The source, read-only: a deploy key on PILOTAAI/unrent created by Unrent's OpenTofu (infra/github).
