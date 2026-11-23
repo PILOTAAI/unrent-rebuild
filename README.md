@@ -20,8 +20,10 @@ public-good trusted root compiled into it. One compromised pipeline cannot ship 
    that get.unrent.dev publishes with only the first signature (`"sigstore": "1-of-2"`):
    - first dispatches `rebuild-check.yml` on `main`: the same checkout, signature-1 check and byte-for-byte rebuild as
      `rebuild.yml`, with no token, tag, signature or release;
-   - only once that dry run passed for the version at the same commit of `main`, creates the same tag in this
-     repository and dispatches `rebuild.yml` at it. The tag can never move or be deleted (ruleset), so a workflow that
+   - only once that dry run passed for the version at the same commit of `main`, its `tag` job creates the same tag
+     on that commit with the release tagger GitHub App, whose push runs `rebuild.yml` at it. Only that App can create
+     `agent-v*` tags here (PILOTAAI/unrent `infra/github/release-tags.tf`), and `rebuild.yml` refuses a tag that is not
+     on this repository's `main`. The tag can never move or be deleted (ruleset), so a workflow that
      cannot run must not be tagged: agent-v0.4.1 was tagged on such a commit (the script lacked its executable bit
      through the sync) and stays at one signature; 0.5.2 is the first release through the dry run (2026-11-21: rebuilt byte for byte
      and countersigned; `agent-v0.5.0` and `agent-v0.5.1` were tagged but never released, see docs/release-signing.md). A tag whose
@@ -30,7 +32,9 @@ public-good trusted root compiled into it. One compromised pipeline cannot ship 
 2. `rebuild.yml` (environment `rebuild`, tags `agent-v*` only):
    - checks signature 1 with cosign v3.1.4 and with the agent's own verifier;
    - `scripts/rebuild.sh`: the tag must be on PILOTAAI/unrent's `main`; downloads the published tarballs; takes the
-     image lock from them; rebuilds with the tag's own `agent/packaging/release.sh` (Go toolchain from `go.mod`,
+     image lock from them but trusts none of it: resolves every image tag of the tag's source itself (the tag's
+     `release-tool pin-images`) and requires the identical lock, and requires every `ghcr.io/pilotaai/*` digest to be
+     attested by its own workflow on PILOTAAI/unrent `main`; rebuilds with the tag's own `agent/packaging/release.sh` (Go toolchain from `go.mod`,
      `-trimpath`, `-buildvcs=false`, `SOURCE_DATE_EPOCH` = commit time, deterministic archive); every tarball must
      have exactly the published SHA-256;
    - only then `cosign sign-blob` keylessly (signing config `signing-config.json`: Fulcio, Rekor v1 at
@@ -43,7 +47,7 @@ A mismatch fails the run and shows which files differ; nothing is signed and no 
 
 ## What this protects against, and what not
 
-It catches a release whose bytes do not come from the tagged source on main: a compromised release run, runner,
+It catches a release whose bytes, or whose pinned image digests, do not come from the tagged source on main: a compromised release run, runner,
 action, cache or release token, or a tag on an unreviewed commit. It does not catch malicious source merged to
 PILOTAAI/unrent's main (both workflows build it faithfully), and both repositories are managed by Unrent's OpenTofu
 (`infra/github` in PILOTAAI/unrent): the GitHub token of that pipeline and GitHub itself remain trusted.
