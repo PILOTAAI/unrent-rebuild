@@ -9,12 +9,17 @@
 #    bundles) and checks SHA256SUMS against the manifest.
 # 3. Verifies signature 1 (PILOTAAI/unrent agent-release.yml at refs/tags/agent-v<version>) on every tarball with the
 #    agent's own verifier (agent/tools/release-tool verify -only release). The workflow checks it with cosign too.
-# 4. Takes the image lock from the published tarball (the release pinned digests at release time; both tarballs must
-#    carry the same lock) and rebuilds with the checkout's agent/packaging/release.sh (reproducible build).
+# 4. Takes the image lock from the published tarball (both tarballs must carry the same lock), but does not trust it:
+#    the lock is an output of the release run, so this pipeline resolves every image tag of the tag's source itself
+#    (the tag's release-tool pin-images) and requires the identical lock, and every first-party image
+#    (ghcr.io/pilotaai/*) must carry a build-provenance attestation by its own workflow on PILOTAAI/unrent main.
+#    Then it rebuilds with the checkout's agent/packaging/release.sh (reproducible build).
 # 5. Every rebuilt tarball must have exactly the published SHA-256. Otherwise it fails and shows which files differ.
 #
 # Environment: RELEASES_BASE (default https://get.unrent.dev), REBUILD_ARCHES (default "amd64 arm64"),
-# TRUSTED_ROOT (tests only: a Sigstore trusted_root.json instead of the one compiled into the agent).
+# TRUSTED_ROOT (tests only: a Sigstore trusted_root.json instead of the one compiled into the agent),
+# IMAGE_LOCK_RESOLVE=placeholder (tests only, offline: re-derive the lock with pin-images -placeholder, whose digests
+# no registry serves, so there are no attestations to check either). The workflows never set either.
 set -euo pipefail
 V=${1:?version} SRC=$(cd "${2:?unrent checkout}" && pwd) OUT=${3:?out dir}
 BASE=${RELEASES_BASE:-https://get.unrent.dev}
@@ -64,6 +69,43 @@ for arch in $ARCHES; do
   if [ -z "$first" ]; then first=$arch; cp "$OUT/lock-$arch.json" "$LOCK"; else cmp -s "$LOCK" "$OUT/lock-$arch.json" || { echo "rebuild: the tarballs carry different image locks" >&2; exit 1; }; fi
 done
 jq -r '.images | to_entries[] | "  \(.key) \(.value.ref)@\(.value.digest)"' "$LOCK"
+
+echo "== image lock re-derived here, not taken from the release run"
+RESOLVE=${IMAGE_LOCK_RESOLVE:-registry}
+case $RESOLVE in
+  registry) "$OUT/release-tool" pin-images -out "$OUT/images.lock.rederived.json" >/dev/null ;;
+  placeholder) "$OUT/release-tool" pin-images -placeholder -out "$OUT/images.lock.rederived.json" >/dev/null ;;
+  *) echo "rebuild: IMAGE_LOCK_RESOLVE is registry or placeholder (tests), not '$RESOLVE'" >&2; exit 2 ;;
+esac
+if ! cmp -s <(jq -S . "$LOCK") <(jq -S . "$OUT/images.lock.rederived.json"); then
+  diff <(jq -S . "$LOCK") <(jq -S . "$OUT/images.lock.rederived.json") >&2 || true
+  echo "rebuild: the published image lock is not what $TAG's image tags resolve to here; not signing" >&2
+  exit 1
+fi
+echo "every digest is what $TAG's tags resolve to"
+# First-party images: the digest must have been built and attested by its own workflow on PILOTAAI/unrent main (a
+# tag of these repositories is pushed by a workflow, which is not proof it ran on main). The attestation is read from
+# the registry (attest-build-provenance pushes it there), so this needs no access to PILOTAAI/unrent's API.
+first_party_workflow() {
+  case $1 in
+    ghcr.io/pilotaai/unrent-postgres) echo postgres-image.yml ;;
+    ghcr.io/pilotaai/unrent-postgres-ha) echo postgres-ha-image.yml ;;
+    ghcr.io/pilotaai/unrent-postgres-documentdb) echo postgres-documentdb-image.yml ;;
+    ghcr.io/pilotaai/unrent-caddy) echo caddy-image.yml ;;
+    *) return 1 ;;
+  esac
+}
+while read -r name ref digest; do
+  repo=${ref%@*}
+  case ${repo##*/} in *:*) repo=${repo%:*} ;; esac
+  case $repo in ghcr.io/pilotaai/*) ;; *) continue ;; esac
+  wf=$(first_party_workflow "$repo") || { echo "rebuild: $name ($repo) is a first-party image with no known producing workflow; not signing" >&2; exit 1; }
+  if [ "$RESOLVE" = placeholder ]; then echo "  $name: attestation not checked (placeholder lock, tests)"; continue; fi
+  gh attestation verify "oci://$repo@$digest" --bundle-from-oci --repo PILOTAAI/unrent \
+    --signer-workflow "PILOTAAI/unrent/.github/workflows/$wf" --source-ref refs/heads/main --deny-self-hosted-runners >/dev/null \
+    || { echo "rebuild: $name ($repo@$digest) has no build-provenance attestation by $wf on PILOTAAI/unrent main; not signing" >&2; exit 1; }
+  echo "  $name: attested by $wf on main"
+done < <(jq -r '.images | to_entries[] | "\(.key) \(.value.ref) \(.value.digest)"' "$LOCK")
 
 echo "== rebuild (reproducible: agent/packaging/release.sh of the tag)"
 # shellcheck disable=SC2086 # ARCHES is a word list
