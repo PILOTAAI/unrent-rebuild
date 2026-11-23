@@ -101,7 +101,7 @@ jobs:
       # NV-37 owner step: pin by full commit SHA, as in PILOTAAI/unrent's agent-release.yml (fail closed until then).
       - name: Release tagger App token (PILOTAAI/unrent-rebuild, Contents write; for the tag step only)
         id: app
-        uses: actions/create-github-app-token@OWNER-MUST-PIN-THIS-TO-A-FULL-COMMIT-SHA
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           app-id: ${{ secrets.RELEASE_TAGGER_APP_ID }}
           private-key: ${{ secrets.RELEASE_TAGGER_APP_KEY }}
