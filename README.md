@@ -2,6 +2,14 @@
 
 The second signature on every [Unrent](https://unrent.dev) agent release.
 
+## Architecture
+
+The [architecture guide](docs/architecture.md) traces the primary provenance, verified dry run, scoped tag authority,
+reproducible build, byte comparison, second Sigstore identity and customer update verifier. The
+[interactive diagram](docs/architecture/unrent-rebuild.html) carries pinned source links.
+
+![Unrent rebuild architecture](docs/architecture/unrent-rebuild.svg)
+
 Unrent agents install an update only if **two independent keyless Sigstore signatures** verify over the tarball's
 exact SHA-256 (2-of-2, no long-lived key anywhere):
 
