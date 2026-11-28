@@ -91,6 +91,7 @@ first_party_workflow() {
     ghcr.io/pilotaai/unrent-postgres) echo postgres-image.yml ;;
     ghcr.io/pilotaai/unrent-postgres-ha) echo postgres-ha-image.yml ;;
     ghcr.io/pilotaai/unrent-postgres-documentdb) echo postgres-documentdb-image.yml ;;
+    ghcr.io/pilotaai/unrent-postgres-supabase) echo postgres-supabase-image.yml ;;
     ghcr.io/pilotaai/unrent-caddy) echo caddy-image.yml ;;
     ghcr.io/pilotaai/unrent-pbm) echo pbm-image.yml ;;
     *) return 1 ;;
